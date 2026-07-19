@@ -37,6 +37,13 @@ struct Snap {
 
 fn main() {
     let current = std::env::args().nth(1).unwrap_or_default();
+    if current == "next" || current == "prev" {
+        navigate(
+            current == "next",
+            &std::env::args().nth(2).unwrap_or_default(),
+        );
+        return;
+    }
     let Some(panes) = tmux_panes() else { return };
     let now = now_ms();
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
@@ -46,17 +53,11 @@ fn main() {
     scan_codex(&home, now, &mut snaps);
     scan_pi(&home, now, &mut snaps);
 
-    // 按 session 创建时间排序：旧的在前，新建的追加在后
-    let mut order: Vec<(u64, String)> = Vec::new();
+    let order = ordered_sessions(&panes);
     let mut cwds: HashMap<String, Vec<String>> = HashMap::new();
-    for (session, created, cwd) in panes {
-        if !cwds.contains_key(&session) {
-            order.push((created, session.clone()));
-        }
+    for (session, _, cwd) in panes {
         cwds.entry(session).or_default().push(cwd);
     }
-    order.sort();
-    let order: Vec<String> = order.into_iter().map(|(_, s)| s).collect();
 
     let mut out = String::new();
     for session in order {
@@ -74,6 +75,33 @@ fn main() {
         out.push_str(&format!("{style} {session}{mark} #[default] "));
     }
     print!("{out}");
+}
+
+/// 按 session 创建时间排序：旧的在前，新建的追加在后（与顶栏显示顺序一致）
+fn ordered_sessions(panes: &[(String, u64, String)]) -> Vec<String> {
+    let mut order: Vec<(u64, &String)> = Vec::new();
+    for (session, created, _) in panes {
+        if !order.iter().any(|(_, s)| *s == session) {
+            order.push((*created, session));
+        }
+    }
+    order.sort();
+    order.into_iter().map(|(_, s)| s.clone()).collect()
+}
+
+/// 按顶栏顺序切换到下一个/上一个 session
+fn navigate(forward: bool, current: &str) {
+    let Some(panes) = tmux_panes() else { return };
+    let names = ordered_sessions(&panes);
+    let Some(i) = names.iter().position(|n| n == current) else { return };
+    let target = if forward {
+        &names[(i + 1) % names.len()]
+    } else {
+        &names[(i + names.len() - 1) % names.len()]
+    };
+    let _ = Command::new("tmux")
+        .args(["switch-client", "-t", &format!("={target}")])
+        .status();
 }
 
 fn session_status(cwds: &[String], snaps: &[Snap]) -> Option<Status> {

@@ -16,6 +16,10 @@ fi
 bg="$(tmux show -gqv @agentbar_bg)"
 bg="${bg:-#2e3b4e}"
 
+# 按顶栏显示顺序循环切换 session
+tmux bind -r Tab run-shell "$BIN next '#{session_name}'"
+tmux bind -r BTab run-shell "$BIN prev '#{session_name}'"
+
 tmux set -g pane-border-status top
 tmux set -g pane-border-format \
   "#{?#{&&:#{pane_at_top},#{pane_at_left}},#[bg=$bg] #($BIN '#{session_name}'),}"
