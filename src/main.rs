@@ -46,14 +46,17 @@ fn main() {
     scan_codex(&home, now, &mut snaps);
     scan_pi(&home, now, &mut snaps);
 
-    let mut order = Vec::new();
+    // 按 session 创建时间排序：旧的在前，新建的追加在后
+    let mut order: Vec<(u64, String)> = Vec::new();
     let mut cwds: HashMap<String, Vec<String>> = HashMap::new();
-    for (session, cwd) in panes {
+    for (session, created, cwd) in panes {
         if !cwds.contains_key(&session) {
-            order.push(session.clone());
+            order.push((created, session.clone()));
         }
         cwds.entry(session).or_default().push(cwd);
     }
+    order.sort();
+    let order: Vec<String> = order.into_iter().map(|(_, s)| s).collect();
 
     let mut out = String::new();
     for session in order {
@@ -87,17 +90,25 @@ fn session_status(cwds: &[String], snaps: &[Snap]) -> Option<Status> {
     best
 }
 
-fn tmux_panes() -> Option<Vec<(String, String)>> {
+fn tmux_panes() -> Option<Vec<(String, u64, String)>> {
     let out = Command::new("tmux")
-        .args(["list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}"])
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{session_created}\t#{pane_current_path}",
+        ])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let panes: Vec<_> = text
         .lines()
         .filter_map(|l| {
-            let (s, p) = l.split_once('\t')?;
-            Some((s.to_string(), p.to_string()))
+            let mut parts = l.splitn(3, '\t');
+            let s = parts.next()?.to_string();
+            let created = parts.next()?.parse().ok()?;
+            let p = parts.next()?.to_string();
+            Some((s, created, p))
         })
         .collect();
     (!panes.is_empty()).then_some(panes)
