@@ -32,4 +32,4 @@ tmux bind -T agentbar BTab run-shell "$BIN prev '#{session_name}'" '\;' switch-c
 
 tmux set -g pane-border-status top
 tmux set -g pane-border-format \
-  "#{?#{&&:#{pane_at_top},#{pane_at_left}},#[bg=$bg] #($BIN '#{session_name}'),}"
+  "#{?#{&&:#{pane_at_top},#{pane_at_left}},#[bg=$bg]#($BIN '#{session_name}'),}"
