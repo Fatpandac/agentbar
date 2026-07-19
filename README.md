@@ -16,7 +16,7 @@ tmux 顶部 session tab 栏，显示每个 session 里 AI agent（claude / codex
 set -g @plugin 'fatpandac/agentbar'
 ```
 
-然后 `prefix + I` 安装。首次加载自动从 GitHub Release 下载对应平台的预编译二进制（macOS/Linux，x86_64/arm64），无需 Rust 环境。
+然后 `prefix + I` 安装。首次加载自动从 GitHub Release 下载对应平台的预编译二进制（macOS arm64，Linux x86_64/arm64），无需 Rust 环境。
 
 ## 配置
 
