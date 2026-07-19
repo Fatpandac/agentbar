@@ -72,7 +72,7 @@ fn main() {
         } else {
             "#[fg=white,bg=colour238]"
         };
-        out.push_str(&format!("{style} {session}{mark} #[default] "));
+        out.push_str(&format!("{style} {session}{mark} #[default]─"));
     }
     print!("{out}");
 }
