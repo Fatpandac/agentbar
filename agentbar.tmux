@@ -24,9 +24,11 @@ fi
 bg="$(tmux show -gqv @agentbar_bg)"
 bg="${bg:-#2e3b4e}"
 
-# 按顶栏显示顺序循环切换 session
-tmux bind -r Tab run-shell "$BIN next '#{session_name}'"
-tmux bind -r BTab run-shell "$BIN prev '#{session_name}'"
+# 按顶栏显示顺序循环切换 session；switch-client 会重置 key table，故用专用表实现连续 Tab
+tmux bind Tab  run-shell "$BIN next '#{session_name}'" '\;' switch-client -T agentbar
+tmux bind BTab run-shell "$BIN prev '#{session_name}'" '\;' switch-client -T agentbar
+tmux bind -T agentbar Tab  run-shell "$BIN next '#{session_name}'" '\;' switch-client -T agentbar
+tmux bind -T agentbar BTab run-shell "$BIN prev '#{session_name}'" '\;' switch-client -T agentbar
 
 tmux set -g pane-border-status top
 tmux set -g pane-border-format \
