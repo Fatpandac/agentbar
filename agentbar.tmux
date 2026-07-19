@@ -3,14 +3,23 @@
 set -e
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN="$CURRENT_DIR/target/release/agentbar"
+BIN="$CURRENT_DIR/bin/agentbar"
 
-# 首次加载时自动编译
+# 首次加载时下载预编译二进制
 if [ ! -x "$BIN" ]; then
-  command -v cargo >/dev/null || { tmux display-message "agentbar: 需要 cargo 来编译"; exit 0; }
-  cargo build --release --manifest-path "$CURRENT_DIR/Cargo.toml" >/dev/null 2>&1
+  case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64)  target=aarch64-apple-darwin ;;
+    Darwin-x86_64) target=x86_64-apple-darwin ;;
+    Linux-x86_64)  target=x86_64-unknown-linux-gnu ;;
+    Linux-aarch64) target=aarch64-unknown-linux-gnu ;;
+    *) tmux display-message "agentbar: 不支持的平台 $(uname -s)-$(uname -m)"; exit 0 ;;
+  esac
+  mkdir -p "$CURRENT_DIR/bin"
+  curl -fsSL -o "$BIN" \
+    "https://github.com/Fatpandac/agentbar/releases/latest/download/agentbar-$target" \
+    && chmod +x "$BIN"
 fi
-[ -x "$BIN" ] || exit 0
+[ -x "$BIN" ] || { tmux display-message "agentbar: 下载二进制失败"; exit 0; }
 
 # 可配置项：set -g @agentbar_bg '#2e3b4e'
 bg="$(tmux show -gqv @agentbar_bg)"
