@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agentbar TPM 入口：底部 window 旁显示 agent 状态标记
+# agentbar TPM 入口：顶部 session tab 栏 + 底部 window 旁 agent 状态标记
 set -e
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +20,15 @@ if [ ! -x "$BIN" ] || [ "$("$BIN" --version 2>/dev/null)" != "$VERSION" ]; then
     && chmod +x "$BIN.tmp" && mv "$BIN.tmp" "$BIN"
 fi
 [ -x "$BIN" ] || { tmux display-message "agentbar: 下载二进制失败"; exit 0; }
+
+# 可配置项：set -g @agentbar_bg '#2e3b4e'
+bg="$(tmux show -gqv @agentbar_bg)"
+bg="${bg:-#2e3b4e}"
+
+# 顶部 session tab 栏
+tmux set -g pane-border-status top
+tmux set -g pane-border-format \
+  "#{?#{&&:#{pane_at_top},#{pane_at_left}},#[bg=$bg]#($BIN '#{session_name}'),}"
 
 # 底部 window 旁显示该 window 下 agent 的运行状态（重复加载不重复追加）
 if ! tmux show -gqv window-status-format | grep -q agentbar; then

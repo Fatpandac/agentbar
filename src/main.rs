@@ -1,4 +1,4 @@
-//! agentbar: tmux 底栏每个 window 旁的 agent 状态标记。
+//! agentbar: tmux 顶栏 session tab + 底栏每个 window 旁的 agent 状态标记。
 //! 状态判定逻辑移植自 opensessions（解析各 agent 的 session JSONL 日志）：
 //!   claude  ~/.claude/projects/<encoded>/*.jsonl
 //!   codex   ~/.codex/sessions/**/*.jsonl
@@ -57,11 +57,48 @@ struct Proc {
 const OWN_TOL_MS: u64 = 2_000;
 
 fn main() {
-    match std::env::args().nth(1).as_deref() {
-        Some("win") => window_mark(&std::env::args().nth(2).unwrap_or_default()),
-        Some("--version") => println!("{}", env!("CARGO_PKG_VERSION")),
+    let current = std::env::args().nth(1).unwrap_or_default();
+    match current.as_str() {
+        "win" => {
+            window_mark(&std::env::args().nth(2).unwrap_or_default());
+            return;
+        }
+        "--version" => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
         _ => {}
     }
+    // 默认模式：顶栏 session tab（不带状态标记，状态看底栏 window）
+    let Some(sessions) = tmux_sessions() else { return };
+    let mut out = String::new();
+    for session in sessions {
+        let style = if session == current {
+            "#[fg=black,bg=green,bold]"
+        } else {
+            "#[fg=white,bg=colour238]"
+        };
+        out.push_str(&format!("{style} {session} #[default]\u{2500}"));
+    }
+    print!("{out}");
+}
+
+/// 所有 session 名，按创建时间排序：旧的在前，新建的追加在后
+fn tmux_sessions() -> Option<Vec<String>> {
+    let out = Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_created}\t#{session_name}"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut order: Vec<(u64, String)> = text
+        .lines()
+        .filter_map(|l| {
+            let (created, name) = l.split_once('\t')?;
+            Some((created.parse().ok()?, name.to_string()))
+        })
+        .collect();
+    order.sort();
+    (!order.is_empty()).then(|| order.into_iter().map(|(_, s)| s).collect())
 }
 
 fn scan_all() -> Vec<Snap> {
