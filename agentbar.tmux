@@ -5,8 +5,9 @@ set -e
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$CURRENT_DIR/bin/agentbar"
 
-# 首次加载时下载预编译二进制
-if [ ! -x "$BIN" ]; then
+# 二进制缺失或版本与源码不一致时（TPM git pull 只更新源码）下载对应版本的预编译二进制
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$CURRENT_DIR/Cargo.toml")
+if [ ! -x "$BIN" ] || [ "$("$BIN" --version 2>/dev/null)" != "$VERSION" ]; then
   case "$(uname -s)-$(uname -m)" in
     Darwin-arm64)  target=aarch64-apple-darwin ;;
     Linux-x86_64)  target=x86_64-unknown-linux-gnu ;;
@@ -14,9 +15,9 @@ if [ ! -x "$BIN" ]; then
     *) tmux display-message "agentbar: 不支持的平台 $(uname -s)-$(uname -m)"; exit 0 ;;
   esac
   mkdir -p "$CURRENT_DIR/bin"
-  curl -fsSL -o "$BIN" \
-    "https://github.com/Fatpandac/agentbar/releases/latest/download/agentbar-$target" \
-    && chmod +x "$BIN"
+  curl -fsSL -o "$BIN.tmp" \
+    "https://github.com/Fatpandac/agentbar/releases/download/v$VERSION/agentbar-$target" \
+    && chmod +x "$BIN.tmp" && mv "$BIN.tmp" "$BIN"
 fi
 [ -x "$BIN" ] || { tmux display-message "agentbar: 下载二进制失败"; exit 0; }
 

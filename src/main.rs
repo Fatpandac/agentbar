@@ -57,8 +57,10 @@ struct Proc {
 const OWN_TOL_MS: u64 = 2_000;
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("win") {
-        window_mark(&std::env::args().nth(2).unwrap_or_default());
+    match std::env::args().nth(1).as_deref() {
+        Some("win") => window_mark(&std::env::args().nth(2).unwrap_or_default()),
+        Some("--version") => println!("{}", env!("CARGO_PKG_VERSION")),
+        _ => {}
     }
 }
 
