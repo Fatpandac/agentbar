@@ -15,7 +15,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const RECENT_MS: u64 = 5 * 60 * 1000; // 只看 5 分钟内活跃的日志（同 opensessions）
 const TOOL_WAIT_MS: u64 = 3_000; // Running + 最后是 tool_use + 3s 没动 → 等确认
-const STUCK_MS: u64 = 15_000; // Running 15s 没动 → 视为闲置
 const CHUNK: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
@@ -636,9 +635,8 @@ fn finalize(mut status: Status, last_tool: bool, mtime: u64, now: u64) -> Option
     if status == Status::Running && last_tool && idle >= TOOL_WAIT_MS {
         status = Status::Waiting;
     }
-    if matches!(status, Status::Running | Status::Waiting) && idle >= STUCK_MS {
-        status = Status::Done;
-    }
+    // 注意：不能按闲置时长强降为 Done：长工具调用/长思考期间日志不写盘，
+    // 会把正在干活的 agent 误判成闲置；agent 崩溃/退出由进程检测兑底（无进程不显示）
     Some(status)
 }
 
@@ -685,11 +683,12 @@ mod tests {
     }
 
     #[test]
-    fn claude_tool_use_escalates_to_waiting_then_stale() {
+    fn claude_tool_use_escalates_to_waiting_and_stays() {
         let raw = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}"#;
         assert_eq!(claude_status(raw, 0, 1000), Some(Status::Running));
         assert_eq!(claude_status(raw, 0, 5000), Some(Status::Waiting));
-        assert_eq!(claude_status(raw, 0, 20_000), Some(Status::Done));
+        // 长时间无写入不再强降 Done：可能是长工具调用或一直在等确认
+        assert_eq!(claude_status(raw, 0, 20_000), Some(Status::Waiting));
     }
 
     #[test]
