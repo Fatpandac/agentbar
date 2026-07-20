@@ -20,12 +20,6 @@ if [ ! -x "$BIN" ]; then
 fi
 [ -x "$BIN" ] || { tmux display-message "agentbar: 下载二进制失败"; exit 0; }
 
-# 按 session 创建顺序循环切换 session；switch-client 会重置 key table，故用专用表实现连续 Tab
-tmux bind Tab  run-shell "$BIN next '#{session_name}'" '\;' switch-client -T agentbar
-tmux bind BTab run-shell "$BIN prev '#{session_name}'" '\;' switch-client -T agentbar
-tmux bind -T agentbar Tab  run-shell "$BIN next '#{session_name}'" '\;' switch-client -T agentbar
-tmux bind -T agentbar BTab run-shell "$BIN prev '#{session_name}'" '\;' switch-client -T agentbar
-
 # 底部 window 旁显示该 window 下 agent 的运行状态（重复加载不重复追加）
 if ! tmux show -gqv window-status-format | grep -q agentbar; then
   tmux set -ga window-status-format         "#($BIN win '#{window_id}')"

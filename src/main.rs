@@ -57,12 +57,8 @@ struct Proc {
 const OWN_TOL_MS: u64 = 2_000;
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_default();
-    let arg = std::env::args().nth(2).unwrap_or_default();
-    match mode.as_str() {
-        "next" | "prev" => navigate(mode == "next", &arg),
-        "win" => window_mark(&arg),
-        _ => {}
+    if std::env::args().nth(1).as_deref() == Some("win") {
+        window_mark(&std::env::args().nth(2).unwrap_or_default());
     }
 }
 
@@ -254,63 +250,12 @@ fn kind_of(args: &str) -> Option<Kind> {
     None
 }
 
-/// 按 session 创建时间排序：旧的在前，新建的追加在后
-fn ordered_sessions(panes: &[(String, u64, String)]) -> Vec<String> {
-    let mut order: Vec<(u64, &String)> = Vec::new();
-    for (session, created, _) in panes {
-        if !order.iter().any(|(_, s)| *s == session) {
-            order.push((*created, session));
-        }
-    }
-    order.sort();
-    order.into_iter().map(|(_, s)| s.clone()).collect()
-}
-
-/// 按创建顺序切换到下一个/上一个 session
-fn navigate(forward: bool, current: &str) {
-    let Some(panes) = tmux_panes() else { return };
-    let names = ordered_sessions(&panes);
-    let Some(i) = names.iter().position(|n| n == current) else { return };
-    let target = if forward {
-        &names[(i + 1) % names.len()]
-    } else {
-        &names[(i + names.len() - 1) % names.len()]
-    };
-    let _ = Command::new("tmux")
-        .args(["switch-client", "-t", &format!("={target}")])
-        .status();
-}
-
 /// 日志 key 是否命中某个 cwd
 fn key_hit(key: &Key, cwd: &str) -> bool {
     match key {
         Key::Path(dir) => cwd == dir || cwd.starts_with(&format!("{dir}/")),
         Key::ClaudeEncoded(enc) => &normalize(cwd) == enc,
     }
-}
-
-fn tmux_panes() -> Option<Vec<(String, u64, String)>> {
-    let out = Command::new("tmux")
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{session_created}\t#{pane_current_path}",
-        ])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let panes: Vec<_> = text
-        .lines()
-        .filter_map(|l| {
-            let mut parts = l.splitn(3, '\t');
-            let s = parts.next()?.to_string();
-            let created = parts.next()?.parse().ok()?;
-            let p = parts.next()?.to_string();
-            Some((s, created, p))
-        })
-        .collect();
-    (!panes.is_empty()).then_some(panes)
 }
 
 // ---------- 文件扫描 ----------
