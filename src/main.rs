@@ -1,4 +1,4 @@
-//! agentbar: tmux 顶栏 session tab + agent 状态标记。
+//! agentbar: tmux 底栏每个 window 旁的 agent 状态标记。
 //! 状态判定逻辑移植自 opensessions（解析各 agent 的 session JSONL 日志）：
 //!   claude  ~/.claude/projects/<encoded>/*.jsonl
 //!   codex   ~/.codex/sessions/**/*.jsonl
@@ -57,30 +57,13 @@ struct Proc {
 const OWN_TOL_MS: u64 = 2_000;
 
 fn main() {
-    let current = std::env::args().nth(1).unwrap_or_default();
-    if current == "next" || current == "prev" {
-        navigate(
-            current == "next",
-            &std::env::args().nth(2).unwrap_or_default(),
-        );
-        return;
+    let mode = std::env::args().nth(1).unwrap_or_default();
+    let arg = std::env::args().nth(2).unwrap_or_default();
+    match mode.as_str() {
+        "next" | "prev" => navigate(mode == "next", &arg),
+        "win" => window_mark(&arg),
+        _ => {}
     }
-    if current == "win" {
-        window_mark(&std::env::args().nth(2).unwrap_or_default());
-        return;
-    }
-    let Some(panes) = tmux_panes() else { return };
-
-    let mut out = String::new();
-    for session in ordered_sessions(&panes) {
-        let style = if session == current {
-            "#[fg=black,bg=green,bold]"
-        } else {
-            "#[fg=white,bg=colour238]"
-        };
-        out.push_str(&format!("{style} {session} #[default] "));
-    }
-    print!("{out}");
 }
 
 fn scan_all() -> Vec<Snap> {
@@ -271,7 +254,7 @@ fn kind_of(args: &str) -> Option<Kind> {
     None
 }
 
-/// 按 session 创建时间排序：旧的在前，新建的追加在后（与顶栏显示顺序一致）
+/// 按 session 创建时间排序：旧的在前，新建的追加在后
 fn ordered_sessions(panes: &[(String, u64, String)]) -> Vec<String> {
     let mut order: Vec<(u64, &String)> = Vec::new();
     for (session, created, _) in panes {
@@ -283,7 +266,7 @@ fn ordered_sessions(panes: &[(String, u64, String)]) -> Vec<String> {
     order.into_iter().map(|(_, s)| s.clone()).collect()
 }
 
-/// 按顶栏顺序切换到下一个/上一个 session
+/// 按创建顺序切换到下一个/上一个 session
 fn navigate(forward: bool, current: &str) {
     let Some(panes) = tmux_panes() else { return };
     let names = ordered_sessions(&panes);

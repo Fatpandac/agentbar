@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agentbar TPM 入口：顶部 session tab 栏 + agent 状态标记
+# agentbar TPM 入口：底部 window 旁显示 agent 状态标记
 set -e
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,11 +20,7 @@ if [ ! -x "$BIN" ]; then
 fi
 [ -x "$BIN" ] || { tmux display-message "agentbar: 下载二进制失败"; exit 0; }
 
-# 可配置项：set -g @agentbar_bg '#2e3b4e'
-bg="$(tmux show -gqv @agentbar_bg)"
-bg="${bg:-#2e3b4e}"
-
-# 按顶栏显示顺序循环切换 session；switch-client 会重置 key table，故用专用表实现连续 Tab
+# 按 session 创建顺序循环切换 session；switch-client 会重置 key table，故用专用表实现连续 Tab
 tmux bind Tab  run-shell "$BIN next '#{session_name}'" '\;' switch-client -T agentbar
 tmux bind BTab run-shell "$BIN prev '#{session_name}'" '\;' switch-client -T agentbar
 tmux bind -T agentbar Tab  run-shell "$BIN next '#{session_name}'" '\;' switch-client -T agentbar
@@ -35,7 +31,3 @@ if ! tmux show -gqv window-status-format | grep -q agentbar; then
   tmux set -ga window-status-format         "#($BIN win '#{window_id}')"
   tmux set -ga window-status-current-format "#($BIN win '#{window_id}')"
 fi
-
-tmux set -g pane-border-status top
-tmux set -g pane-border-format \
-  "#{?#{&&:#{pane_at_top},#{pane_at_left}},#[bg=$bg]#($BIN '#{session_name}'),}"
