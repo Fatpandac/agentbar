@@ -1,6 +1,6 @@
 # agentbar
 
-tmux 顶部 session tab 栏，并在底部状态栏每个 window 旁显示该 window 下 AI agent（claude / codex / pi）的实时状态。
+tmux 顶部 session tab 栏（带该 session 的 agent 状态聚合），并在底部状态栏每个 window 旁显示该 window 下 AI agent（claude / codex / pi）的实时状态。
 状态判定解析各 agent 的 session JSONL 日志（思路来自 [opensessions](https://github.com/ataraxy-labs/opensessions)），不依赖 CPU 采样。
 
 标记：

@@ -46,9 +46,9 @@ struct Snap {
 /// tmux 里正在跑的一个 agent 进程
 struct Proc {
     kind: Kind,
-    start: u64,   // 进程启动时间（ms）
-    cwd: String,  // 所在 pane 的 cwd
-    mine: bool,   // 是否属于当前 window
+    start: u64,    // 进程启动时间（ms）
+    cwd: String,   // 所在 pane 的 cwd
+    group: String, // 归属分组：window_id（底栏）或 session_name（顶栏）
 }
 
 // 认领容差：只容 ps etime 秒级精度的抖动。必须足够小，
@@ -72,18 +72,49 @@ fn main() {
         }
         _ => {}
     }
-    // 默认模式：顶栏 session tab（不带状态标记，状态看底栏 window）
-    let Some(sessions) = tmux_sessions() else { return };
-    let mut out = String::new();
-    for session in sessions {
+    // 默认模式：顶栏 session tab + 该 session 下 agent 状态聚合（同底栏的归属规则，按 session 分组）
+    let Ok(out) = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_created}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}",
+        ])
+        .output()
+    else {
+        return;
+    };
+    let mut order: Vec<(u64, String)> = Vec::new();
+    let mut panes = Vec::new(); // (session, pid, cwd)
+    let mut cwds: HashMap<String, Vec<String>> = HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut parts = line.splitn(4, '\t');
+        let (Some(created), Some(session), Some(pid), Some(cwd)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let (Ok(created), Ok(pid)) = (created.parse::<u64>(), pid.parse::<u32>()) else { continue };
+        if !order.iter().any(|(_, s)| s == session) {
+            order.push((created, session.to_string()));
+        }
+        cwds.entry(session.to_string()).or_default().push(cwd.to_string());
+        panes.push((session.to_string(), pid, cwd.to_string()));
+    }
+    order.sort();
+    let procs = agent_procs(&panes);
+    let snaps = scan_all();
+    let mut line = String::new();
+    for (_, session) in order {
+        let mark = mark(group_status(&cwds[&session], &session, &procs, &snaps));
         let style = if session == current {
             "#[fg=black,bg=green,bold]"
         } else {
             "#[fg=white,bg=colour238]"
         };
-        out.push_str(&format!("{style} {session} #[default]\u{2500}"));
+        line.push_str(&format!("{style} {session}{mark} #[default]\u{2500}"));
     }
-    print!("{out}");
+    print!("{line}");
 }
 
 /// 按顶栏顺序切换到下一个/上一个 session
@@ -151,7 +182,7 @@ fn window_mark(window_id: &str) {
     else {
         return;
     };
-    let mut panes = Vec::new(); // (mine, pane_pid, cwd)
+    let mut panes = Vec::new(); // (window_id, pane_pid, cwd)
     let mut cwds = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let mut parts = line.splitn(3, '\t');
@@ -159,27 +190,30 @@ fn window_mark(window_id: &str) {
             continue;
         };
         let Ok(pid) = pid.parse::<u32>() else { continue };
-        let mine = win == window_id;
-        if mine {
+        if win == window_id {
             cwds.push(cwd.to_string());
         }
-        panes.push((mine, pid, cwd.to_string()));
+        panes.push((win.to_string(), pid, cwd.to_string()));
     }
     let procs = agent_procs(&panes);
-    if cwds.is_empty() || !procs.iter().any(|p| p.mine) {
+    if cwds.is_empty() {
         return;
     }
-    print!("{}", mark(window_status(&cwds, &procs, &scan_all())));
+    print!("{}", mark(group_status(&cwds, window_id, &procs, &scan_all())));
 }
 
-/// window 级状态：只统计归属于本 window agent 进程的日志。
+/// 分组（window / session）级状态：只统计归属于本组 agent 进程的日志。
 /// 归属规则（依次）：
 /// 1. 时间认领：文件属于「启动时间 ≤ session 创建时间、且启动最晚」的同类同目录进程；
 /// 2. 排除法（resume 场景：文件比所有进程都老）：若同类同目录只剩一个名下无文件的
 ///    进程和一个无主文件，则配对；
 /// 3. 仍认不出（如两个 resume）退回共享显示，不丢状态。
-fn window_status(cwds: &[String], procs: &[Proc], snaps: &[Snap]) -> Option<Status> {
-    let mine_kinds: Vec<Kind> = procs.iter().filter(|p| p.mine).map(|p| p.kind).collect();
+fn group_status(cwds: &[String], group: &str, procs: &[Proc], snaps: &[Snap]) -> Option<Status> {
+    let mine_kinds: Vec<Kind> = procs
+        .iter()
+        .filter(|p| p.group == group)
+        .map(|p| p.kind)
+        .collect();
     // 第一轮：按时间给每个文件认领进程（全局，不限本 window）
     let owner: Vec<Option<usize>> = snaps
         .iter()
@@ -202,7 +236,7 @@ fn window_status(cwds: &[String], procs: &[Proc], snaps: &[Snap]) -> Option<Stat
             continue;
         }
         let counted = match owner[i] {
-            Some(o) => procs[o].mine,
+            Some(o) => procs[o].group == group,
             None => {
                 // 排除法：名下无文件的同类同目录进程
                 let free: Vec<usize> = procs
@@ -222,8 +256,8 @@ fn window_status(cwds: &[String], procs: &[Proc], snaps: &[Snap]) -> Option<Stat
                     .filter(|(s, o)| s.kind == snap.kind && o.is_none())
                     .count();
                 match free[..] {
-                    [f] if orphans == 1 => procs[f].mine, // 唯一配对
-                    _ => true,                            // 认不出 → 共享显示
+                    [f] if orphans == 1 => procs[f].group == group, // 唯一配对
+                    _ => true, // 认不出 → 共享显示
                 }
             }
         };
@@ -235,7 +269,7 @@ fn window_status(cwds: &[String], procs: &[Proc], snaps: &[Snap]) -> Option<Stat
 }
 
 /// 遍历所有 pane 的进程树，找出正在跑的 agent 进程（类型 + 启动时间 + pane cwd）
-fn agent_procs(panes: &[(bool, u32, String)]) -> Vec<Proc> {
+fn agent_procs(panes: &[(String, u32, String)]) -> Vec<Proc> {
     let Ok(out) = Command::new("ps")
         .args(["-eo", "pid=,ppid=,etime=,args="])
         .output()
@@ -260,12 +294,12 @@ fn agent_procs(panes: &[(bool, u32, String)]) -> Vec<Proc> {
         info.insert(pid, (start, it.collect::<Vec<_>>().join(" ")));
     }
     let mut procs = Vec::new();
-    for (mine, pane_pid, cwd) in panes {
+    for (group, pane_pid, cwd) in panes {
         let mut stack = vec![*pane_pid];
         while let Some(pid) = stack.pop() {
             if let Some((start, args)) = info.get(&pid) {
                 if let Some(kind) = kind_of(args) {
-                    procs.push(Proc { kind, start: *start, cwd: cwd.clone(), mine: *mine });
+                    procs.push(Proc { kind, start: *start, cwd: cwd.clone(), group: group.clone() });
                 }
             }
             if let Some(cs) = children.get(&pid) {
@@ -715,35 +749,35 @@ mod tests {
     fn ownership_splits_same_dir_agents() {
         let cwds = vec!["/repo".to_string()];
         let procs = vec![
-            Proc { kind: Kind::Pi, start: 1_000, cwd: "/repo".into(), mine: true },
-            Proc { kind: Kind::Pi, start: 60_000, cwd: "/repo".into(), mine: false },
+            Proc { kind: Kind::Pi, start: 1_000, cwd: "/repo".into(), group: "me".into() },
+            Proc { kind: Kind::Pi, start: 60_000, cwd: "/repo".into(), group: "other".into() },
         ];
         let snap = |status, born| Snap { key: Key::Path("/repo".into()), status, kind: Kind::Pi, born };
         // 我的进程（1s 启动）创建的文件 → 算我的
-        assert_eq!(window_status(&cwds, &procs, &[snap(Status::Running, 2_000)]), Some(Status::Running));
+        assert_eq!(group_status(&cwds, "me", &procs, &[snap(Status::Running, 2_000)]), Some(Status::Running));
         // 另一个 window 的进程（60s 启动）创建的文件 → 不算我的
-        assert_eq!(window_status(&cwds, &procs, &[snap(Status::Running, 61_000)]), None);
+        assert_eq!(group_status(&cwds, "me", &procs, &[snap(Status::Running, 61_000)]), None);
         // 排除法：我的进程名下已有文件，resume 的无主文件应归唯一空闲的另一方 → 不算我的
         assert_eq!(
-            window_status(&cwds, &procs, &[snap(Status::Running, 2_000), snap(Status::Done, 0)]),
+            group_status(&cwds, "me", &procs, &[snap(Status::Running, 2_000), snap(Status::Done, 0)]),
             Some(Status::Running)
         );
         // 反过来：对方名下有文件，我空闲 → resume 文件归我
         assert_eq!(
-            window_status(&cwds, &procs, &[snap(Status::Running, 61_000), snap(Status::Done, 0)]),
+            group_status(&cwds, "me", &procs, &[snap(Status::Running, 61_000), snap(Status::Done, 0)]),
             Some(Status::Done)
         );
         // 两个无主文件（双 resume）认不出 → 共享显示
         assert_eq!(
-            window_status(&cwds, &procs, &[snap(Status::Done, 0), snap(Status::Running, 100)]),
+            group_status(&cwds, "me", &procs, &[snap(Status::Done, 0), snap(Status::Running, 100)]),
             Some(Status::Running)
         );
         // 单进程 + 无主文件（普通 resume）→ 排除法直接归它
-        let solo = vec![Proc { kind: Kind::Pi, start: 60_000, cwd: "/repo".into(), mine: true }];
-        assert_eq!(window_status(&cwds, &solo, &[snap(Status::Done, 0)]), Some(Status::Done));
+        let solo = vec![Proc { kind: Kind::Pi, start: 60_000, cwd: "/repo".into(), group: "me".into() }];
+        assert_eq!(group_status(&cwds, "me", &solo, &[snap(Status::Done, 0)]), Some(Status::Done));
         // 我没跑这个类型 → 不显示
-        let other = vec![Proc { kind: Kind::Claude, start: 1_000, cwd: "/repo".into(), mine: true }];
-        assert_eq!(window_status(&cwds, &other, &[snap(Status::Running, 2_000)]), None);
+        let other = vec![Proc { kind: Kind::Claude, start: 1_000, cwd: "/repo".into(), group: "me".into() }];
+        assert_eq!(group_status(&cwds, "me", &other, &[snap(Status::Running, 2_000)]), None);
     }
 
     #[test]
