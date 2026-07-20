@@ -25,6 +25,13 @@ enum Status {
     Waiting,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    Claude,
+    Codex,
+    Pi,
+}
+
 enum Key {
     Path(String),           // codex / pi：日志里的真实 cwd
     ClaudeEncoded(String),  // claude：目录名（编码路径），归一化后比较
@@ -33,7 +40,21 @@ enum Key {
 struct Snap {
     key: Key,
     status: Status,
+    kind: Kind,
+    born: u64, // session 创建时间（日志首行时间戳，ms），用于把文件认领给具体 agent 进程
 }
+
+/// tmux 里正在跑的一个 agent 进程
+struct Proc {
+    kind: Kind,
+    start: u64,   // 进程启动时间（ms）
+    cwd: String,  // 所在 pane 的 cwd
+    mine: bool,   // 是否属于当前 window
+}
+
+// 认领容差：只容 ps etime 秒级精度的抖动。必须足够小，
+// 否则几秒内先后启动的两个同目录 agent 会被后启动者抢走全部文件
+const OWN_TOL_MS: u64 = 2_000;
 
 fn main() {
     let current = std::env::args().nth(1).unwrap_or_default();
@@ -44,37 +65,210 @@ fn main() {
         );
         return;
     }
-    let Some(panes) = tmux_panes() else { return };
-    let now = now_ms();
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-
-    let mut snaps = Vec::new();
-    scan_claude(&home, now, &mut snaps);
-    scan_codex(&home, now, &mut snaps);
-    scan_pi(&home, now, &mut snaps);
-
-    let order = ordered_sessions(&panes);
-    let mut cwds: HashMap<String, Vec<String>> = HashMap::new();
-    for (session, _, cwd) in panes {
-        cwds.entry(session).or_default().push(cwd);
+    if current == "win" {
+        window_mark(&std::env::args().nth(2).unwrap_or_default());
+        return;
     }
+    let Some(panes) = tmux_panes() else { return };
 
     let mut out = String::new();
-    for session in order {
-        let mark = match session_status(&cwds[&session], &snaps) {
-            Some(Status::Waiting) => " 🔔",
-            Some(Status::Running) => " ⚡",
-            Some(Status::Done) => " 💤",
-            None => "",
-        };
+    for session in ordered_sessions(&panes) {
         let style = if session == current {
             "#[fg=black,bg=green,bold]"
         } else {
             "#[fg=white,bg=colour238]"
         };
-        out.push_str(&format!("{style} {session}{mark} #[default]─"));
+        out.push_str(&format!("{style} {session} #[default] "));
     }
     print!("{out}");
+}
+
+fn scan_all() -> Vec<Snap> {
+    let now = now_ms();
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let mut snaps = Vec::new();
+    scan_claude(&home, now, &mut snaps);
+    scan_codex(&home, now, &mut snaps);
+    scan_pi(&home, now, &mut snaps);
+    snaps
+}
+
+fn mark(status: Option<Status>) -> &'static str {
+    match status {
+        Some(Status::Waiting) => " 🔔",
+        Some(Status::Running) => " ⚡",
+        Some(Status::Done) => " 💤",
+        None => "",
+    }
+}
+
+/// 输出单个 window 的 agent 状态标记（底部 window-status-format 用）
+// ponytail: 每个 window 各起一个进程全量扫描 jsonl；window 很多导致状态栏卡顿时再改成单进程缓存
+fn window_mark(window_id: &str) {
+    let Ok(out) = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{window_id}\t#{pane_pid}\t#{pane_current_path}",
+        ])
+        .output()
+    else {
+        return;
+    };
+    let mut panes = Vec::new(); // (mine, pane_pid, cwd)
+    let mut cwds = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(win), Some(pid), Some(cwd)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<u32>() else { continue };
+        let mine = win == window_id;
+        if mine {
+            cwds.push(cwd.to_string());
+        }
+        panes.push((mine, pid, cwd.to_string()));
+    }
+    let procs = agent_procs(&panes);
+    if cwds.is_empty() || !procs.iter().any(|p| p.mine) {
+        return;
+    }
+    print!("{}", mark(window_status(&cwds, &procs, &scan_all())));
+}
+
+/// window 级状态：只统计归属于本 window agent 进程的日志。
+/// 归属规则（依次）：
+/// 1. 时间认领：文件属于「启动时间 ≤ session 创建时间、且启动最晚」的同类同目录进程；
+/// 2. 排除法（resume 场景：文件比所有进程都老）：若同类同目录只剩一个名下无文件的
+///    进程和一个无主文件，则配对；
+/// 3. 仍认不出（如两个 resume）退回共享显示，不丢状态。
+fn window_status(cwds: &[String], procs: &[Proc], snaps: &[Snap]) -> Option<Status> {
+    let mine_kinds: Vec<Kind> = procs.iter().filter(|p| p.mine).map(|p| p.kind).collect();
+    // 第一轮：按时间给每个文件认领进程（全局，不限本 window）
+    let owner: Vec<Option<usize>> = snaps
+        .iter()
+        .map(|snap| {
+            procs
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    p.kind == snap.kind
+                        && key_hit(&snap.key, &p.cwd)
+                        && p.start <= snap.born + OWN_TOL_MS
+                })
+                .max_by_key(|(_, p)| p.start)
+                .map(|(i, _)| i)
+        })
+        .collect();
+    let mut best: Option<Status> = None;
+    for (i, snap) in snaps.iter().enumerate() {
+        if !mine_kinds.contains(&snap.kind) || !cwds.iter().any(|c| key_hit(&snap.key, c)) {
+            continue;
+        }
+        let counted = match owner[i] {
+            Some(o) => procs[o].mine,
+            None => {
+                // 排除法：名下无文件的同类同目录进程
+                let free: Vec<usize> = procs
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, p)| {
+                        p.kind == snap.kind
+                            && key_hit(&snap.key, &p.cwd)
+                            && !owner.contains(&Some(*j))
+                    })
+                    .map(|(j, _)| j)
+                    .collect();
+                // 同组无主文件数
+                let orphans = snaps
+                    .iter()
+                    .zip(&owner)
+                    .filter(|(s, o)| s.kind == snap.kind && o.is_none())
+                    .count();
+                match free[..] {
+                    [f] if orphans == 1 => procs[f].mine, // 唯一配对
+                    _ => true,                            // 认不出 → 共享显示
+                }
+            }
+        };
+        if counted && best.map_or(true, |b| snap.status > b) {
+            best = Some(snap.status);
+        }
+    }
+    best
+}
+
+/// 遍历所有 pane 的进程树，找出正在跑的 agent 进程（类型 + 启动时间 + pane cwd）
+fn agent_procs(panes: &[(bool, u32, String)]) -> Vec<Proc> {
+    let Ok(out) = Command::new("ps")
+        .args(["-eo", "pid=,ppid=,etime=,args="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let now = now_ms();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut info: HashMap<u32, (u64, String)> = HashMap::new(); // pid -> (start_ms, args)
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(pid), Some(ppid), Some(etime)) = (
+            it.next().and_then(|s| s.parse().ok()),
+            it.next().and_then(|s| s.parse().ok()),
+            it.next(),
+        ) else {
+            continue;
+        };
+        children.entry(ppid).or_default().push(pid);
+        let start = now.saturating_sub(parse_etime(etime) * 1000);
+        info.insert(pid, (start, it.collect::<Vec<_>>().join(" ")));
+    }
+    let mut procs = Vec::new();
+    for (mine, pane_pid, cwd) in panes {
+        let mut stack = vec![*pane_pid];
+        while let Some(pid) = stack.pop() {
+            if let Some((start, args)) = info.get(&pid) {
+                if let Some(kind) = kind_of(args) {
+                    procs.push(Proc { kind, start: *start, cwd: cwd.clone(), mine: *mine });
+                }
+            }
+            if let Some(cs) = children.get(&pid) {
+                stack.extend(cs);
+            }
+        }
+    }
+    procs
+}
+
+/// 解析 ps etime（[[dd-]hh:]mm:ss）为秒
+fn parse_etime(s: &str) -> u64 {
+    let (days, rest) = match s.split_once('-') {
+        Some((d, r)) => (d.parse().unwrap_or(0), r),
+        None => (0, s),
+    };
+    let parts: Vec<u64> = rest.split(':').filter_map(|p| p.parse().ok()).collect();
+    let secs = match parts[..] {
+        [h, m, s] => h * 3600 + m * 60 + s,
+        [m, s] => m * 60 + s,
+        [s] => s,
+        _ => 0,
+    };
+    days * 86_400 + secs
+}
+
+/// 从进程命令行识别 agent：前两个 token 的 basename 命中 claude/codex/pi
+/// （兼容 "claude ..." 和 "node /path/to/claude ..." 两种形态）
+fn kind_of(args: &str) -> Option<Kind> {
+    for tok in args.split_whitespace().take(2) {
+        match tok.rsplit('/').next().unwrap_or(tok) {
+            "claude" => return Some(Kind::Claude),
+            "codex" => return Some(Kind::Codex),
+            "pi" => return Some(Kind::Pi),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// 按 session 创建时间排序：旧的在前，新建的追加在后（与顶栏显示顺序一致）
@@ -104,18 +298,12 @@ fn navigate(forward: bool, current: &str) {
         .status();
 }
 
-fn session_status(cwds: &[String], snaps: &[Snap]) -> Option<Status> {
-    let mut best: Option<Status> = None;
-    for snap in snaps {
-        let hit = cwds.iter().any(|cwd| match &snap.key {
-            Key::Path(dir) => cwd == dir || cwd.starts_with(&format!("{dir}/")),
-            Key::ClaudeEncoded(enc) => &normalize(cwd) == enc,
-        });
-        if hit && best.map_or(true, |b| snap.status > b) {
-            best = Some(snap.status);
-        }
+/// 日志 key 是否命中某个 cwd
+fn key_hit(key: &Key, cwd: &str) -> bool {
+    match key {
+        Key::Path(dir) => cwd == dir || cwd.starts_with(&format!("{dir}/")),
+        Key::ClaudeEncoded(enc) => &normalize(cwd) == enc,
     }
-    best
 }
 
 fn tmux_panes() -> Option<Vec<(String, u64, String)>> {
@@ -157,7 +345,12 @@ fn scan_claude(home: &Path, now: u64, snaps: &mut Vec<Snap>) {
             let path = file.path();
             let Some(mtime) = recent_jsonl_mtime(&path, now) else { continue };
             if let Some(status) = claude_status(&read_tail(&path), mtime, now) {
-                snaps.push(Snap { key: Key::ClaudeEncoded(encoded.clone()), status });
+                snaps.push(Snap {
+                    key: Key::ClaudeEncoded(encoded.clone()),
+                    status,
+                    kind: Kind::Claude,
+                    born: head_born(&read_head(&path)),
+                });
             }
         }
     }
@@ -170,9 +363,10 @@ fn scan_codex(home: &Path, now: u64, snaps: &mut Vec<Snap>) {
         .join("sessions");
     for path in walk_jsonl(&root) {
         let Some(mtime) = recent_jsonl_mtime(&path, now) else { continue };
-        let Some(cwd) = codex_cwd(&read_head(&path)) else { continue };
+        let head = read_head(&path);
+        let Some(cwd) = codex_cwd(&head) else { continue };
         if let Some(status) = codex_status(&read_tail(&path), mtime, now) {
-            snaps.push(Snap { key: Key::Path(cwd), status });
+            snaps.push(Snap { key: Key::Path(cwd), status, kind: Kind::Codex, born: head_born(&head) });
         }
     }
 }
@@ -183,9 +377,10 @@ fn scan_pi(home: &Path, now: u64, snaps: &mut Vec<Snap>) {
         .unwrap_or_else(|| home.join(".pi/agent/sessions"));
     for path in walk_jsonl(&root) {
         let Some(mtime) = recent_jsonl_mtime(&path, now) else { continue };
-        let Some(cwd) = pi_cwd(&read_head(&path)) else { continue };
+        let head = read_head(&path);
+        let Some(cwd) = pi_cwd(&head) else { continue };
         if let Some(status) = pi_status(&read_tail(&path), mtime, now) {
-            snaps.push(Snap { key: Key::Path(cwd), status });
+            snaps.push(Snap { key: Key::Path(cwd), status, kind: Kind::Pi, born: head_born(&head) });
         }
     }
 }
@@ -218,6 +413,32 @@ fn recent_jsonl_mtime(path: &Path, now: u64) -> Option<u64> {
         .ok()?
         .as_millis() as u64;
     (now.saturating_sub(mtime) <= RECENT_MS).then_some(mtime)
+}
+
+/// session 创建时间：日志头部第一个带 timestamp 的条目（UTC）。
+/// 注意不能用文件 birthtime：那是首次写盘时间，可能晚于另一个 agent 启动，导致认领错乱。
+/// 拿不到返回 0 → 视为无法认领，退回共享显示
+fn head_born(head: &str) -> u64 {
+    lines(head)
+        .find_map(|e| e.get("timestamp")?.as_str().and_then(ts_ms))
+        .unwrap_or(0)
+}
+
+/// 解析 ISO8601 UTC（2026-07-20T07:12:50.354Z）为 epoch ms，避免引 chrono
+fn ts_ms(s: &str) -> Option<u64> {
+    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<u64>().ok();
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    let ms = if s.as_bytes().get(19) == Some(&b'.') { num(20..23).unwrap_or(0) } else { 0 };
+    // days-from-civil（Howard Hinnant 算法）
+    let (y, mo, d) = (y as i64, mo as i64, d as i64);
+    let yy = if mo <= 2 { y - 1 } else { y };
+    let era = yy.div_euclid(400);
+    let yoe = yy - era * 400;
+    let doy = (153 * ((mo + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some((days as u64 * 86_400 + h * 3600 + mi * 60 + sec) * 1000 + ms)
 }
 
 /// 文件头 64KB（拿 cwd 等元信息，去掉末尾不完整行）
@@ -504,5 +725,63 @@ mod tests {
             Some("/repo")
         );
         assert_eq!(normalize("/Users/me/.dir_x"), "-Users-me--dir-x");
+    }
+
+    #[test]
+    fn ownership_splits_same_dir_agents() {
+        let cwds = vec!["/repo".to_string()];
+        let procs = vec![
+            Proc { kind: Kind::Pi, start: 1_000, cwd: "/repo".into(), mine: true },
+            Proc { kind: Kind::Pi, start: 60_000, cwd: "/repo".into(), mine: false },
+        ];
+        let snap = |status, born| Snap { key: Key::Path("/repo".into()), status, kind: Kind::Pi, born };
+        // 我的进程（1s 启动）创建的文件 → 算我的
+        assert_eq!(window_status(&cwds, &procs, &[snap(Status::Running, 2_000)]), Some(Status::Running));
+        // 另一个 window 的进程（60s 启动）创建的文件 → 不算我的
+        assert_eq!(window_status(&cwds, &procs, &[snap(Status::Running, 61_000)]), None);
+        // 排除法：我的进程名下已有文件，resume 的无主文件应归唯一空闲的另一方 → 不算我的
+        assert_eq!(
+            window_status(&cwds, &procs, &[snap(Status::Running, 2_000), snap(Status::Done, 0)]),
+            Some(Status::Running)
+        );
+        // 反过来：对方名下有文件，我空闲 → resume 文件归我
+        assert_eq!(
+            window_status(&cwds, &procs, &[snap(Status::Running, 61_000), snap(Status::Done, 0)]),
+            Some(Status::Done)
+        );
+        // 两个无主文件（双 resume）认不出 → 共享显示
+        assert_eq!(
+            window_status(&cwds, &procs, &[snap(Status::Done, 0), snap(Status::Running, 100)]),
+            Some(Status::Running)
+        );
+        // 单进程 + 无主文件（普通 resume）→ 排除法直接归它
+        let solo = vec![Proc { kind: Kind::Pi, start: 60_000, cwd: "/repo".into(), mine: true }];
+        assert_eq!(window_status(&cwds, &solo, &[snap(Status::Done, 0)]), Some(Status::Done));
+        // 我没跑这个类型 → 不显示
+        let other = vec![Proc { kind: Kind::Claude, start: 1_000, cwd: "/repo".into(), mine: true }];
+        assert_eq!(window_status(&cwds, &other, &[snap(Status::Running, 2_000)]), None);
+    }
+
+    #[test]
+    fn ts_parse() {
+        assert_eq!(ts_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(ts_ms("2026-07-20T07:12:50.354Z"), Some(1_784_531_570_354));
+        assert_eq!(ts_ms("bad"), None);
+    }
+
+    #[test]
+    fn etime_parse() {
+        assert_eq!(parse_etime("05:33"), 333);
+        assert_eq!(parse_etime("01:02:03"), 3723);
+        assert_eq!(parse_etime("2-01:00:00"), 2 * 86_400 + 3600);
+    }
+
+    #[test]
+    fn kind_detection() {
+        assert_eq!(kind_of("claude --resume"), Some(Kind::Claude));
+        assert_eq!(kind_of("node /x/bin/pi"), Some(Kind::Pi));
+        assert_eq!(kind_of("/usr/local/bin/codex exec"), Some(Kind::Codex));
+        assert_eq!(kind_of("vim main.rs"), None);
+        assert_eq!(kind_of("pip install x"), None);
     }
 }

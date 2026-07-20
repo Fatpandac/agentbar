@@ -1,6 +1,6 @@
 # agentbar
 
-tmux 顶部 session tab 栏，显示每个 session 里 AI agent（claude / codex / pi）的实时状态。
+tmux 顶部 session tab 栏，并在底部每个 window 旁显示该 window 下 AI agent（claude / codex / pi）的实时状态。
 状态判定解析各 agent 的 session JSONL 日志（思路来自 [opensessions](https://github.com/ataraxy-labs/opensessions)），不依赖 CPU 采样。
 
 标记：
@@ -8,7 +8,7 @@ tmux 顶部 session tab 栏，显示每个 session 里 AI agent（claude / codex
 - 🔔 agent 在等你确认/输入
 - ⚡ agent 正在干活
 - 💤 agent 已完成/空闲
-- 无标记：该 session 没开 agent
+- 无标记：该 window 没开 agent
 
 ## 安装（TPM）
 

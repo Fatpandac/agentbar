@@ -30,6 +30,12 @@ tmux bind BTab run-shell "$BIN prev '#{session_name}'" '\;' switch-client -T age
 tmux bind -T agentbar Tab  run-shell "$BIN next '#{session_name}'" '\;' switch-client -T agentbar
 tmux bind -T agentbar BTab run-shell "$BIN prev '#{session_name}'" '\;' switch-client -T agentbar
 
+# 底部 window 旁显示该 window 下 agent 的运行状态（重复加载不重复追加）
+if ! tmux show -gqv window-status-format | grep -q agentbar; then
+  tmux set -ga window-status-format         "#($BIN win '#{window_id}')"
+  tmux set -ga window-status-current-format "#($BIN win '#{window_id}')"
+fi
+
 tmux set -g pane-border-status top
 tmux set -g pane-border-format \
   "#{?#{&&:#{pane_at_top},#{pane_at_left}},#[bg=$bg]#($BIN '#{session_name}'),}"
