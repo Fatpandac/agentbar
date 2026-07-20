@@ -67,6 +67,10 @@ fn main() {
             println!("{}", env!("CARGO_PKG_VERSION"));
             return;
         }
+        "next" | "prev" => {
+            navigate(current == "next", &std::env::args().nth(2).unwrap_or_default());
+            return;
+        }
         _ => {}
     }
     // 默认模式：顶栏 session tab（不带状态标记，状态看底栏 window）
@@ -81,6 +85,20 @@ fn main() {
         out.push_str(&format!("{style} {session} #[default]\u{2500}"));
     }
     print!("{out}");
+}
+
+/// 按顶栏顺序切换到下一个/上一个 session
+fn navigate(forward: bool, current: &str) {
+    let Some(names) = tmux_sessions() else { return };
+    let Some(i) = names.iter().position(|n| n == current) else { return };
+    let target = if forward {
+        &names[(i + 1) % names.len()]
+    } else {
+        &names[(i + names.len() - 1) % names.len()]
+    };
+    let _ = Command::new("tmux")
+        .args(["switch-client", "-t", &format!("={target}")])
+        .status();
 }
 
 /// 所有 session 名，按创建时间排序：旧的在前，新建的追加在后
