@@ -49,6 +49,7 @@ struct Proc {
     start: u64,    // 进程启动时间（ms）
     cwd: String,   // 所在 pane 的 cwd
     group: String, // 归属分组：window_id（底栏）或 session_name（顶栏）
+    loc: String,   // 人类可读位置 session:window.pane（通知用，底栏模式为空）
 }
 
 // 认领容差：只容 ps etime 秒级精度的抖动。必须足够小，
@@ -70,6 +71,10 @@ fn main() {
             navigate(current == "next", &std::env::args().nth(2).unwrap_or_default());
             return;
         }
+        "focus" => {
+            focus(&std::env::args().nth(2).unwrap_or_default());
+            return;
+        }
         _ => {}
     }
     // 默认模式：顶栏 session tab + 该 session 下 agent 状态聚合（同底栏的归属规则，按 session 分组）
@@ -78,7 +83,7 @@ fn main() {
             "list-panes",
             "-a",
             "-F",
-            "#{session_created}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}",
+            "#{session_created}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_current_path}",
         ])
         .output()
     else {
@@ -88,10 +93,15 @@ fn main() {
     let mut panes = Vec::new(); // (session, pid, cwd)
     let mut cwds: HashMap<String, Vec<String>> = HashMap::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let mut parts = line.splitn(4, '\t');
-        let (Some(created), Some(session), Some(pid), Some(cwd)) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
+        let mut parts = line.splitn(6, '\t');
+        let (Some(created), Some(session), Some(win), Some(pane), Some(pid), Some(cwd)) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
             continue;
         };
         let (Ok(created), Ok(pid)) = (created.parse::<u64>(), pid.parse::<u32>()) else { continue };
@@ -99,7 +109,7 @@ fn main() {
             order.push((created, session.to_string()));
         }
         cwds.entry(session.to_string()).or_default().push(cwd.to_string());
-        panes.push((session.to_string(), pid, cwd.to_string()));
+        panes.push((session.to_string(), pid, cwd.to_string(), format!("{session}:{win}.{pane}")));
     }
     order.sort();
     let procs = agent_procs(&panes);
@@ -115,6 +125,7 @@ fn main() {
         line.push_str(&format!("{style} {session}{mark} #[default]\u{2500}"));
     }
     print!("{line}");
+    notify(&snaps, &procs);
 }
 
 /// 按顶栏顺序切换到下一个/上一个 session
@@ -193,7 +204,7 @@ fn window_mark(window_id: &str) {
         if win == window_id {
             cwds.push(cwd.to_string());
         }
-        panes.push((win.to_string(), pid, cwd.to_string()));
+        panes.push((win.to_string(), pid, cwd.to_string(), String::new()));
     }
     let procs = agent_procs(&panes);
     if cwds.is_empty() {
@@ -215,21 +226,7 @@ fn group_status(cwds: &[String], group: &str, procs: &[Proc], snaps: &[Snap]) ->
         .map(|p| p.kind)
         .collect();
     // 第一轮：按时间给每个文件认领进程（全局，不限本 window）
-    let owner: Vec<Option<usize>> = snaps
-        .iter()
-        .map(|snap| {
-            procs
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| {
-                    p.kind == snap.kind
-                        && key_hit(&snap.key, &p.cwd)
-                        && p.start <= snap.born + OWN_TOL_MS
-                })
-                .max_by_key(|(_, p)| p.start)
-                .map(|(i, _)| i)
-        })
-        .collect();
+    let owner = owners(procs, snaps);
     let mut best: Option<Status> = None;
     for (i, snap) in snaps.iter().enumerate() {
         if !mine_kinds.contains(&snap.kind) || !cwds.iter().any(|c| key_hit(&snap.key, c)) {
@@ -268,8 +265,149 @@ fn group_status(cwds: &[String], group: &str, procs: &[Proc], snaps: &[Snap]) ->
     best
 }
 
+/// 按时间给每个日志文件认领归属进程（规则见 group_status）
+fn owners(procs: &[Proc], snaps: &[Snap]) -> Vec<Option<usize>> {
+    snaps
+        .iter()
+        .map(|snap| {
+            procs
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    p.kind == snap.kind
+                        && key_hit(&snap.key, &p.cwd)
+                        && p.start <= snap.born + OWN_TOL_MS
+                })
+                .max_by_key(|(_, p)| p.start)
+                .map(|(i, _)| i)
+        })
+        .collect()
+}
+
+/// 状态跳变为 Done/Waiting 时发系统通知（macOS osascript / Linux notify-send）。
+/// 上次状态记在 ~/.cache/agentbar/state.tsv；lock 文件防多客户端并发重复通知。
+/// 只在顶栏默认模式调用（每 status-interval 一次）；客户端 detach 期间不发通知。
+fn notify(snaps: &[Snap], procs: &[Proc]) {
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let dir = PathBuf::from(home).join(".cache/agentbar");
+    let _ = fs::create_dir_all(&dir);
+    let lock = dir.join("lock");
+    if fs::OpenOptions::new().write(true).create_new(true).open(&lock).is_err() {
+        let fresh = lock
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|e| e.as_secs() < 5);
+        if fresh {
+            return; // 另一个客户端的实例刚跑过
+        }
+        let _ = fs::write(&lock, b""); // 陈旧锁（持有者崩溃）：刷新后接管
+    }
+    let state = dir.join("state.tsv");
+    let prev: HashMap<String, String> = fs::read_to_string(&state)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once('\t').map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect();
+    let owner = owners(procs, snaps);
+    let mut next = String::new();
+    for (i, snap) in snaps.iter().enumerate() {
+        let keystr = match &snap.key {
+            Key::Path(p) => p.as_str(),
+            Key::ClaudeEncoded(e) => e.as_str(),
+        };
+        let key = format!("{:?}:{}:{}", snap.kind, snap.born, keystr);
+        let cur = format!("{:?}", snap.status);
+        // 首次见到的文件只记基线不通知，避免启动时对已完成的旧 session 刷屏
+        if snap.status != Status::Running && prev.get(&key).is_some_and(|p| *p != cur) {
+            // ponytail: 无主文件（如双 resume 认不出归属）不通知，认不出具体 pane
+            if let Some(o) = owner[i] {
+                let what = if snap.status == Status::Waiting { "等待输入" } else { "执行结束" };
+                send(&format!("{} 在 {} {what}", kind_name(snap.kind), procs[o].loc), &procs[o].loc);
+            }
+        }
+        next.push_str(&format!("{key}\t{cur}\n"));
+    }
+    let _ = fs::write(&state, next);
+    let _ = fs::remove_file(&lock);
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Claude => "claude",
+        Kind::Codex => "codex",
+        Kind::Pi => "pi",
+    }
+}
+
+/// macOS 优先 terminal-notifier（支持点击回调跳到目标 pane），未安装退回 osascript（不可点）；
+/// Linux 退化为 notify-send。新通知 API 只对签名 .app 开放，裸二进制只有这两条路。
+fn send(msg: &str, loc: &str) {
+    if cfg!(target_os = "macos") {
+        if let Ok(exe) = std::env::current_exe() {
+            let spawned = Command::new("terminal-notifier")
+                .args([
+                    "-title",
+                    "agentbar",
+                    "-message",
+                    msg,
+                    "-execute",
+                    &format!("'{}' focus '{loc}'", exe.display()),
+                ])
+                .spawn();
+            if spawned.is_ok() {
+                return;
+            }
+        }
+        let m = msg.replace(['"', '\\'], " ");
+        let _ = Command::new("osascript")
+            .args(["-e", &format!("display notification \"{m}\" with title \"agentbar\"")])
+            .spawn();
+    } else {
+        let _ = Command::new("notify-send").args(["agentbar", msg]).spawn();
+    }
+}
+
+/// 通知点击回调：激活终端 App 并切到目标 pane（loc = session:window.pane）
+fn focus(loc: &str) {
+    // 通知点击回调跑在 launchd 的精简环境里，PATH 没有 brew 目录 → 找不到 tmux
+    let path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{path}:/opt/homebrew/bin:/usr/local/bin"));
+    let (target, pane) = loc.rsplit_once('.').unwrap_or((loc, ""));
+    // 激活终端 App（从 tmux 全局环境推断）
+    if let Ok(out) = Command::new("tmux").args(["show-environment", "-g", "TERM_PROGRAM"]).output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let app = match text.trim().rsplit('=').next().unwrap_or("") {
+            "ghostty" => "Ghostty",
+            "iTerm.app" => "iTerm",
+            "Apple_Terminal" => "Terminal",
+            "WezTerm" => "WezTerm",
+            "kitty" => "kitty",
+            _ => "",
+        };
+        if !app.is_empty() {
+            let _ = Command::new("open").args(["-a", app]).status();
+        }
+    }
+    // 先定好目标 session 的当前 window/pane，再把 attach 的客户端切过去
+    let _ = Command::new("tmux").args(["select-window", "-t", &format!("={target}")]).status();
+    if !pane.is_empty() {
+        let _ = Command::new("tmux")
+            .args(["select-pane", "-t", &format!("={target}.{pane}")])
+            .status();
+    }
+    if let Ok(out) = Command::new("tmux").args(["list-clients", "-F", "#{client_name}"]).output() {
+        if let Some(client) = String::from_utf8_lossy(&out.stdout).lines().next() {
+            let _ = Command::new("tmux")
+                .args(["switch-client", "-c", client, "-t", &format!("={target}")])
+                .status();
+        }
+    }
+}
+
 /// 遍历所有 pane 的进程树，找出正在跑的 agent 进程（类型 + 启动时间 + pane cwd）
-fn agent_procs(panes: &[(String, u32, String)]) -> Vec<Proc> {
+fn agent_procs(panes: &[(String, u32, String, String)]) -> Vec<Proc> {
     let Ok(out) = Command::new("ps")
         .args(["-eo", "pid=,ppid=,etime=,args="])
         .output()
@@ -294,12 +432,18 @@ fn agent_procs(panes: &[(String, u32, String)]) -> Vec<Proc> {
         info.insert(pid, (start, it.collect::<Vec<_>>().join(" ")));
     }
     let mut procs = Vec::new();
-    for (group, pane_pid, cwd) in panes {
+    for (group, pane_pid, cwd, loc) in panes {
         let mut stack = vec![*pane_pid];
         while let Some(pid) = stack.pop() {
             if let Some((start, args)) = info.get(&pid) {
                 if let Some(kind) = kind_of(args) {
-                    procs.push(Proc { kind, start: *start, cwd: cwd.clone(), group: group.clone() });
+                    procs.push(Proc {
+                        kind,
+                        start: *start,
+                        cwd: cwd.clone(),
+                        group: group.clone(),
+                        loc: loc.clone(),
+                    });
                 }
             }
             if let Some(cs) = children.get(&pid) {
@@ -749,8 +893,8 @@ mod tests {
     fn ownership_splits_same_dir_agents() {
         let cwds = vec!["/repo".to_string()];
         let procs = vec![
-            Proc { kind: Kind::Pi, start: 1_000, cwd: "/repo".into(), group: "me".into() },
-            Proc { kind: Kind::Pi, start: 60_000, cwd: "/repo".into(), group: "other".into() },
+            Proc { kind: Kind::Pi, start: 1_000, cwd: "/repo".into(), group: "me".into(), loc: String::new() },
+            Proc { kind: Kind::Pi, start: 60_000, cwd: "/repo".into(), group: "other".into(), loc: String::new() },
         ];
         let snap = |status, born| Snap { key: Key::Path("/repo".into()), status, kind: Kind::Pi, born };
         // 我的进程（1s 启动）创建的文件 → 算我的
@@ -773,10 +917,10 @@ mod tests {
             Some(Status::Running)
         );
         // 单进程 + 无主文件（普通 resume）→ 排除法直接归它
-        let solo = vec![Proc { kind: Kind::Pi, start: 60_000, cwd: "/repo".into(), group: "me".into() }];
+        let solo = vec![Proc { kind: Kind::Pi, start: 60_000, cwd: "/repo".into(), group: "me".into(), loc: String::new() }];
         assert_eq!(group_status(&cwds, "me", &solo, &[snap(Status::Done, 0)]), Some(Status::Done));
         // 我没跑这个类型 → 不显示
-        let other = vec![Proc { kind: Kind::Claude, start: 1_000, cwd: "/repo".into(), group: "me".into() }];
+        let other = vec![Proc { kind: Kind::Claude, start: 1_000, cwd: "/repo".into(), group: "me".into(), loc: String::new() }];
         assert_eq!(group_status(&cwds, "me", &other, &[snap(Status::Running, 2_000)]), None);
     }
 
