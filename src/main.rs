@@ -71,6 +71,15 @@ fn main() {
             navigate(current == "next", &std::env::args().nth(2).unwrap_or_default());
             return;
         }
+        "at" => {
+            let n = std::env::args().nth(2).and_then(|s| s.parse::<usize>().ok());
+            if let (Some(names), Some(n)) = (tmux_sessions(), n) {
+                if let Some(target) = names.get(n.wrapping_sub(1)) {
+                    switch_to(target);
+                }
+            }
+            return;
+        }
         "focus" => {
             focus(&std::env::args().nth(2).unwrap_or_default());
             return;
@@ -137,6 +146,10 @@ fn navigate(forward: bool, current: &str) {
     } else {
         &names[(i + names.len() - 1) % names.len()]
     };
+    switch_to(target);
+}
+
+fn switch_to(target: &str) {
     let _ = Command::new("tmux")
         .args(["switch-client", "-t", &format!("={target}")])
         .status();

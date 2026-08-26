@@ -22,6 +22,34 @@ set -g @plugin 'fatpandac/agentbar'
 
 然后 `prefix + I` 安装。首次加载自动从 GitHub Release 下载对应平台的预编译二进制（macOS arm64，Linux x86_64/arm64），无需 Rust 环境。
 
+## 切换 session
+
+- `prefix + Tab` / `prefix + Shift+Tab`：按顶栏顺序循环切换（repeat-time 内可连按）
+- `Alt/Option + 1..9`：直接跳到顶栏第 N 个 session（插件绑在 root 表，无需 prefix）
+
+### Cmd + 数字（需终端配合）
+
+tmux 收不到 Cmd 键：终端只传字节流，`Ctrl`/`Alt` 有标准编码（`Alt+1` = `Esc 1`），而 macOS 的 Cmd 是应用层修饰键，没有编码，tmux 的 `bind` 也没有 `Super`/`Cmd` 修饰符。
+所以要用 `Cmd + 数字`，得让终端把 `Cmd+N` 翻译成 `Esc N`（即 `Alt+N`），再由插件的 `M-1..M-9` 接住。
+
+**Ghostty**（`~/.config/ghostty/config`）：
+
+```
+keybind = cmd+digit_1=text:\x1b1
+keybind = cmd+digit_2=text:\x1b2
+keybind = cmd+digit_3=text:\x1b3
+# ... 以此类推到 cmd+digit_9
+```
+
+注意必须写 `digit_N`：`cmd+1` 不会覆盖 Ghostty 默认的 `super+digit_1=goto_tab:1`，配置看着生效实则被默认切标签页吃掉。
+改完按 `Cmd+Shift+,` reload，用 `ghostty +list-keybinds | grep digit_1` 可确认。
+
+**iTerm2**：Settings → Keys → Key Bindings，给 ⌘1..⌘9 选 “Send Escape Sequence”，内容填 `1`..`9`（需先关掉 Preferences → Keys 里自带的 ⌘数字切标签页）。
+
+**其他终端**：只要能把 `Cmd+N` 发送成 `ESC` + 数字字符即可（WezTerm 用 `action=wezterm.action.SendString("\x1b1")`）。
+
+代价：Cmd+1..9 被占用后不能再切终端自己的标签页。不想改终端配置就用 `Alt/Option + 1..9`（Ghostty 需 `macos-option-as-alt = true`）。
+
 ## 配置
 
 ```tmux

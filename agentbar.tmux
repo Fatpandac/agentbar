@@ -32,6 +32,11 @@ tmux bind -r BTab run-shell "$BIN prev '#{session_name}'" '\;' switch-client -T 
 tmux unbind -T agentbar Tab  2>/dev/null || true
 tmux unbind -T agentbar BTab 2>/dev/null || true
 
+# M-1..M-9 直接按顶栏顺序跳到第 N 个 session（Cmd+数字需终端把 cmd+N 映射成 \e N，见 README）
+for n in 1 2 3 4 5 6 7 8 9; do
+  tmux bind -n "M-$n" run-shell "$BIN at $n"
+done
+
 # 顶部 session tab 栏
 tmux set -g pane-border-status top
 tmux set -g pane-border-format \
