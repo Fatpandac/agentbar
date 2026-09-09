@@ -124,14 +124,14 @@ fn main() {
     let procs = agent_procs(&panes);
     let snaps = scan_all();
     let mut line = String::new();
-    for (_, session) in order {
+    for (i, (_, session)) in order.into_iter().enumerate() {
         let mark = mark(group_status(&cwds[&session], &session, &procs, &snaps));
         let style = if session == current {
             "#[fg=black,bg=green,bold]"
         } else {
             "#[fg=white,bg=colour238]"
         };
-        line.push_str(&format!("{style} {session}{mark} #[default]\u{2500}"));
+        line.push_str(&format!("{style} {}\u{2502}{session}{mark} #[default]\u{2500}", i + 1));
     }
     print!("{line}");
     notify(&snaps, &procs);
