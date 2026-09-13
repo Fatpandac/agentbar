@@ -3,7 +3,8 @@
 //!   claude  ~/.claude/projects/<encoded>/*.jsonl
 //!   codex   ~/.codex/sessions/**/*.jsonl
 //!   pi      ~/.pi/agent/sessions/**/*.jsonl
-//! 标记：🔔 等你确认/输入  ⚡ 正在干活  💤 已完成/空闲  （无标记 = 没开 agent）
+//! 顶栏背景：黄 = 等输入，青蓝 = 运行中，绿 = 当前 session，默认灰 = 完成/空闲或无 agent；状态色优先。
+//! 底栏：🔔 等你确认/输入  ⚡ 正在干活  💤 已完成/空闲  （无标记 = 没开 agent）
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -125,13 +126,9 @@ fn main() {
     let snaps = scan_all();
     let mut line = String::new();
     for (i, (_, session)) in order.into_iter().enumerate() {
-        let mark = mark(group_status(&cwds[&session], &session, &procs, &snaps));
-        let style = if session == current {
-            "#[fg=black,bg=green,bold]"
-        } else {
-            "#[fg=white,bg=colour238]"
-        };
-        line.push_str(&format!("{style} {}\u{2502}{session}{mark} #[default]\u{2500}", i + 1));
+        let status = group_status(&cwds[&session], &session, &procs, &snaps);
+        let style = tab_style(status, session == current);
+        line.push_str(&format!("{style} {}\u{2502}{session} #[default]\u{2500}", i + 1));
     }
     print!("{line}");
     notify(&snaps, &procs);
@@ -181,6 +178,15 @@ fn scan_all() -> Vec<Snap> {
     scan_codex(&home, now, &mut snaps);
     scan_pi(&home, now, &mut snaps);
     snaps
+}
+
+fn tab_style(status: Option<Status>, current: bool) -> &'static str {
+    match status {
+        Some(Status::Waiting) => "#[fg=black,bg=#E5C07B]",
+        Some(Status::Running) => "#[fg=black,bg=#56B6C2]",
+        _ if current => "#[fg=black,bg=green,bold]",
+        _ => "#[fg=white,bg=colour238]",
+    }
 }
 
 fn mark(status: Option<Status>) -> &'static str {
@@ -861,6 +867,20 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_background_reflects_status() {
+        assert_eq!(tab_style(Some(Status::Waiting), false), "#[fg=black,bg=#E5C07B]");
+        assert_eq!(tab_style(Some(Status::Running), false), "#[fg=black,bg=#56B6C2]");
+        assert_eq!(tab_style(Some(Status::Done), false), "#[fg=white,bg=colour238]");
+        assert_eq!(tab_style(None, false), "#[fg=white,bg=colour238]");
+        assert_eq!(
+            tab_style(Some(Status::Running), true),
+            "#[fg=black,bg=#56B6C2]"
+        );
+        assert_eq!(tab_style(Some(Status::Done), true), "#[fg=black,bg=green,bold]");
+        assert_eq!(tab_style(None, true), "#[fg=black,bg=green,bold]");
+    }
 
     #[test]
     fn pi_running_then_done() {

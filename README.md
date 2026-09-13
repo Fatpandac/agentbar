@@ -3,7 +3,15 @@
 tmux 顶部 session tab 栏（带该 session 的 agent 状态聚合），并在底部状态栏每个 window 旁显示该 window 下 AI agent（claude / codex / pi）的实时状态。
 状态判定解析各 agent 的 session JSONL 日志（思路来自 [opensessions](https://github.com/ataraxy-labs/opensessions)），不依赖 CPU 采样。
 
-标记：
+顶部 session tab 用整个背景颜色表示状态：
+
+- 琥珀黄 `#E5C07B`：agent 在等你确认/输入
+- 青蓝色 `#56B6C2`：agent 正在干活
+- 默认灰色：agent 已完成/空闲，或该 session 没有 agent
+
+当前选中的 session 保持绿色背景，不使用下划线；等待和运行状态色优先覆盖绿色。
+
+底部 window 仍使用紧凑标记：
 
 - 🔔 agent 在等你确认/输入
 - ⚡ agent 正在干活
