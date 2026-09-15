@@ -5,11 +5,10 @@ tmux 顶部 session tab 栏（带该 session 的 agent 状态聚合），并在�
 
 顶部 session tab 用整个背景颜色表示状态：
 
+- 绿色：当前聚焦的 session（优先级最高，不管有没有 agent 在跑）
 - 琥珀黄 `#E5C07B`：agent 在等你确认/输入
 - 青蓝色 `#56B6C2`：agent 正在干活
 - 默认灰色：agent 已完成/空闲，或该 session 没有 agent
-
-当前选中的 session 保持绿色背景，不使用下划线；等待和运行状态色优先覆盖绿色。
 
 底部 window 仍使用紧凑标记：
 

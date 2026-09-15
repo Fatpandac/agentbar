@@ -3,7 +3,7 @@
 //!   claude  ~/.claude/projects/<encoded>/*.jsonl
 //!   codex   ~/.codex/sessions/**/*.jsonl
 //!   pi      ~/.pi/agent/sessions/**/*.jsonl
-//! 顶栏背景：黄 = 等输入，青蓝 = 运行中，绿 = 当前 session，默认灰 = 完成/空闲或无 agent；状态色优先。
+//! 顶栏背景：绿 = 当前 session（最高优先级），黄 = 等输入，青蓝 = 运行中，默认灰 = 完成/空闲或无 agent。
 //! 底栏：🔔 等你确认/输入  ⚡ 正在干活  💤 已完成/空闲  （无标记 = 没开 agent）
 
 use serde_json::Value;
@@ -181,10 +181,12 @@ fn scan_all() -> Vec<Snap> {
 }
 
 fn tab_style(status: Option<Status>, current: bool) -> &'static str {
+    if current {
+        return "#[fg=black,bg=green,bold]";
+    }
     match status {
         Some(Status::Waiting) => "#[fg=black,bg=#E5C07B]",
         Some(Status::Running) => "#[fg=black,bg=#56B6C2]",
-        _ if current => "#[fg=black,bg=green,bold]",
         _ => "#[fg=white,bg=colour238]",
     }
 }
@@ -874,10 +876,8 @@ mod tests {
         assert_eq!(tab_style(Some(Status::Running), false), "#[fg=black,bg=#56B6C2]");
         assert_eq!(tab_style(Some(Status::Done), false), "#[fg=white,bg=colour238]");
         assert_eq!(tab_style(None, false), "#[fg=white,bg=colour238]");
-        assert_eq!(
-            tab_style(Some(Status::Running), true),
-            "#[fg=black,bg=#56B6C2]"
-        );
+        assert_eq!(tab_style(Some(Status::Running), true), "#[fg=black,bg=green,bold]");
+        assert_eq!(tab_style(Some(Status::Waiting), true), "#[fg=black,bg=green,bold]");
         assert_eq!(tab_style(Some(Status::Done), true), "#[fg=black,bg=green,bold]");
         assert_eq!(tab_style(None, true), "#[fg=black,bg=green,bold]");
     }
